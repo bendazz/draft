@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Draft CSV Browser</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0b0c10;
+      --fg: #e6e6e6;
+      --muted: #9aa0a6;
+      --accent: #3b82f6;
+      --border: #2d333b;
+    }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      margin: 0;
+      padding: 0 1rem 2rem;
+      line-height: 1.45;
+    }
+    header {
+      padding: 1rem 0 .5rem;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .5rem 0 1rem; }
+    select, input[type="text"], button {
+      font: inherit;
+      padding: .5rem .6rem;
+      border: 1px solid var(--border);
+      border-radius: .5rem;
+      background: transparent;
+      color: inherit;
+    }
+    input[type="text"] { min-width: 16rem; }
+    button.primary { background: var(--accent); color: white; border: none; }
+    .hint { color: var(--muted); font-size: .9rem; }
+    .status { margin: .5rem 0 1rem; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { text-align: left; position: sticky; top: 0; background: inherit; }
+    th, td { border-bottom: 1px solid var(--border); padding: .4rem .5rem; vertical-align: top; }
+    tbody tr:hover { background: rgba(59,130,246,.08); }
+    .table-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--border); border-radius: .5rem; }
+    .sr-only { position: absolute; left: -9999px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Draft CSV Browser</h1>
+  <div class="hint">Pick a column, enter a value. Matching is case-insensitive: exact for Rnd. and Pick No.; contains for all other columns.</div>
+  </header>
+
+  <section class="controls">
+    <label for="columnSelect" class="sr-only">Column</label>
+    <select id="columnSelect" disabled></select>
+
+    <label for="queryInput" class="sr-only">Value</label>
+    <input id="queryInput" type="text" placeholder="Enter value…" disabled />
+
+    <button id="clearBtn" type="button" disabled>Clear</button>
+  </section>
+
+  <div class="status" id="status">Loading CSV…</div>
+
+  <div class="table-wrap">
+    <table id="resultsTable" aria-live="polite" aria-busy="true">
+      <thead><tr id="headerRow"></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    // Minimal RFC-4180-ish CSV parser (handles commas in quotes and escaped quotes)
+    function parseCSV(text) {
+      const rows = [];
+      let row = [];
+      let cur = '';
+      let inQuotes = false;
+      let i = 0;
+      // Normalize newlines
+      text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      while (i < text.length) {
+        const ch = text[i];
+        if (inQuotes) {
+          if (ch === '"') {
+            if (text[i + 1] === '"') { // escaped quote
+              cur += '"';
+              i += 2;
+              continue;
+            } else {
+              inQuotes = false;
+              i++;
+              continue;
+            }
+          } else {
+            cur += ch;
+            i++;
+            continue;
+          }
+        } else {
+          if (ch === '"') {
+            inQuotes = true; i++; continue;
+          }
+          if (ch === ',') {
+            row.push(cur); cur = ''; i++; continue;
+          }
+          if (ch === '\n') {
+            row.push(cur); rows.push(row); row = []; cur = ''; i++; continue;
+          }
+          cur += ch; i++;
+        }
+      }
+      // flush last cell/row if any content or a trailing empty field
+      if (inQuotes) {
+        // Unbalanced quotes – best effort: close and continue
+        inQuotes = false;
+      }
+      if (cur !== '' || row.length) {
+        row.push(cur); rows.push(row);
+      }
+      return rows;
+    }
+
+    async function loadCSV(url) {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+      return await res.text();
+    }
+
+    function buildTableHeader(headers) {
+      const headerRow = document.getElementById('headerRow');
+      headerRow.textContent = '';
+      for (const h of headers) {
+        const th = document.createElement('th');
+        th.textContent = h;
+        headerRow.appendChild(th);
+      }
+    }
+
+    function renderRows(headers, rows) {
+      const tbody = document.getElementById('tbody');
+      tbody.textContent = '';
+      const frag = document.createDocumentFragment();
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        for (let c = 0; c < headers.length; c++) {
+          const td = document.createElement('td');
+          td.textContent = (r[c] ?? '').toString();
+          tr.appendChild(td);
+        }
+        frag.appendChild(tr);
+      }
+      tbody.appendChild(frag);
+    }
+
+    function updateStatus(msg) {
+      document.getElementById('status').textContent = msg;
+    }
+
+    (async function init() {
+      try {
+        const csvText = await loadCSV('draft.csv');
+        const rows = parseCSV(csvText);
+        if (!rows.length) throw new Error('CSV is empty');
+        const headers = rows[0].map(h => h.trim());
+        const data = rows.slice(1);
+
+        buildTableHeader(headers);
+        renderRows(headers, []);
+
+        const select = document.getElementById('columnSelect');
+        const input = document.getElementById('queryInput');
+        const clearBtn = document.getElementById('clearBtn');
+
+        // Populate select
+        select.innerHTML = headers.map((h, idx) => `<option value="${idx}">${h.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
+        select.disabled = false;
+        input.disabled = false;
+        clearBtn.disabled = false;
+        updateStatus(`Loaded ${data.length} rows. Choose a column and enter a value to filter.`);
+        document.getElementById('resultsTable').setAttribute('aria-busy', 'false');
+
+        function applyFilter() {
+          const colIdx = parseInt(select.value, 10) || 0;
+          const q = input.value.toLowerCase();
+          if (!q) {
+            renderRows(headers, []);
+            updateStatus(`Loaded ${data.length} rows. Enter a value to filter.`);
+            return;
+          }
+          const mode = (colIdx === 0 || colIdx === 1) ? 'exact' : 'contains';
+          const filtered = data.filter(r => {
+            const cell = ((r[colIdx] ?? '') + '').toLowerCase();
+            return mode === 'exact' ? (cell === q) : cell.includes(q);
+          });
+          renderRows(headers, filtered);
+          updateStatus(`${filtered.length} match(es) for “${input.value}” in “${headers[colIdx]}” (${mode}).`);
+        }
+
+        input.addEventListener('input', applyFilter);
+        select.addEventListener('change', applyFilter);
+        clearBtn.addEventListener('click', () => { input.value = ''; input.focus(); applyFilter(); });
+
+      } catch (err) {
+        console.error(err);
+        updateStatus(`Error loading CSV: ${err.message}. If you opened this file directly, please run a local server (e.g., \npython3 -m http.server\n) and open http://localhost:8000/`);
+      }
+    })();
+  </script>
+</body>
+</html>
